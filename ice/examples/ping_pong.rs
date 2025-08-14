@@ -144,6 +144,12 @@ async fn main() -> Result<(), Error> {
                 .value_name("URL")
                 .help("STUN server URL (e.g. stun:stun.l.google.com:19302)")
                 .default_value("stun:stun.l.google.com:19302"),
+        )
+        .arg(
+            Arg::with_name("exclude-vpn-ip")
+                .takes_value(false)
+                .long("exclude-vpn-ip")
+                .help("Exclude VPN IP 192.168.10.2 from candidate gathering"),
         );
 
     let matches = app.clone().get_matches();
@@ -157,6 +163,7 @@ async fn main() -> Result<(), Error> {
     let use_mux = matches.is_present("use-mux");
     let remote_host = matches.value_of("remote-host").unwrap();
     let stun_server_url = matches.value_of("stun-server").unwrap();
+    let exclude_vpn_ip = matches.is_present("exclude-vpn-ip");
 
     let (local_http_port, remote_http_port) = if is_controlling {
         (9000, 9001)
@@ -196,6 +203,7 @@ async fn main() -> Result<(), Error> {
         }
         println!("Remote host: {}", remote_host);
         println!("STUN server: {}", stun_server_url);
+        println!("VPN IP filtering: {}", if exclude_vpn_ip { "ENABLED (excluding 192.168.10.2)" } else { "DISABLED" });
         println!("Local signaling port: {}", local_http_port);
         println!("Remote signaling port: {}", remote_http_port);
         println!("Press 'Enter' when both processes have started");
@@ -218,12 +226,24 @@ async fn main() -> Result<(), Error> {
         let stun_url = Url::parse_url(stun_server_url)?;
         println!("Using STUN server: {}", stun_url);
 
+        // Configure IP filter to exclude VPN IP if requested
+        let ip_filter = if exclude_vpn_ip {
+            println!("Excluding VPN IP: 192.168.10.2");
+            Arc::new(Some(Box::new(|ip: std::net::IpAddr| -> bool {
+                // Exclude the VPN IP
+                ip.to_string() != "192.168.10.2"
+            }) as Box<dyn (Fn(std::net::IpAddr) -> bool) + Send + Sync>))
+        } else {
+            Arc::new(None)
+        };
+
         let ice_agent = Arc::new(
             Agent::new(AgentConfig {
                 urls: vec![stun_url],
                 network_types: vec![NetworkType::Udp4],
                 udp_network,
                 is_controlling,
+                ip_filter,
                 ..Default::default()
             })
             .await?,
