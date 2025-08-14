@@ -12,6 +12,7 @@ use ice::candidate::*;
 use ice::network_type::*;
 use ice::state::*;
 use ice::udp_network::UDPNetwork;
+use ice::url::Url;
 use ice::Error;
 use rand::{rng, Rng};
 use tokio::net::UdpSocket;
@@ -88,20 +89,21 @@ async fn remote_handler(req: Request<Body>) -> Result<Response<Body>, hyper::Err
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
-    env_logger::init();
-    // .format(|buf, record| {
-    //     writeln!(
-    //         buf,
-    //         "{}:{} [{}] {} - {}",
-    //         record.file().unwrap_or("unknown"),
-    //         record.line().unwrap_or(0),
-    //         record.level(),
-    //         chrono::Local::now().format("%H:%M:%S.%6f"),
-    //         record.args()
-    //     )
-    // })
-    // .filter(None, log::LevelFilter::Trace)
-    // .init();
+    env_logger::Builder::new()
+        .format(|buf, record| {
+            use std::io::Write;
+            writeln!(
+                buf,
+                "{}:{} [{}] {} - {}",
+                record.file().unwrap_or("unknown"),
+                record.line().unwrap_or(0),
+                record.level(),
+                chrono::Local::now().format("%H:%M:%S.%6f"),
+                record.args()
+            )
+        })
+        .filter(None, log::LevelFilter::Trace)
+        .init();
 
     let mut app = App::new("ICE Demo")
         .version("0.1.0")
@@ -126,6 +128,22 @@ async fn main() -> Result<(), Error> {
                 .takes_value(false)
                 .long("controlling")
                 .help("is ICE Agent controlling"),
+        )
+        .arg(
+            Arg::with_name("remote-host")
+                .takes_value(true)
+                .long("remote-host")
+                .value_name("IP")
+                .help("Remote host IP address for signaling")
+                .default_value("localhost"),
+        )
+        .arg(
+            Arg::with_name("stun-server")
+                .takes_value(true)
+                .long("stun-server")
+                .value_name("URL")
+                .help("STUN server URL (e.g. stun:stun.l.google.com:19302)")
+                .default_value("stun:stun.l.google.com:19302"),
         );
 
     let matches = app.clone().get_matches();
@@ -137,6 +155,8 @@ async fn main() -> Result<(), Error> {
 
     let is_controlling = matches.is_present("controlling");
     let use_mux = matches.is_present("use-mux");
+    let remote_host = matches.value_of("remote-host").unwrap();
+    let stun_server_url = matches.value_of("stun-server").unwrap();
 
     let (local_http_port, remote_http_port) = if is_controlling {
         (9000, 9001)
@@ -147,7 +167,7 @@ async fn main() -> Result<(), Error> {
     let (weak_conn, weak_agent) = {
         let (done_tx, done_rx) = watch::channel(());
 
-        println!("Listening on http://localhost:{local_http_port}");
+        println!("Listening on http://0.0.0.0:{local_http_port}");
         let mut done_http_server = done_rx.clone();
         tokio::spawn(async move {
             let addr = ([0, 0, 0, 0], local_http_port).into();
@@ -168,11 +188,16 @@ async fn main() -> Result<(), Error> {
             };
         });
 
+        println!("=== ICE Ping Pong Debug ===");
         if is_controlling {
-            println!("Local Agent is controlling");
+            println!("Mode: Controlling Agent");
         } else {
-            println!("Local Agent is controlled");
-        };
+            println!("Mode: Controlled Agent");
+        }
+        println!("Remote host: {}", remote_host);
+        println!("STUN server: {}", stun_server_url);
+        println!("Local signaling port: {}", local_http_port);
+        println!("Remote signaling port: {}", remote_http_port);
         println!("Press 'Enter' when both processes have started");
         let mut input = String::new();
         let _ = io::stdin().read_line(&mut input)?;
@@ -189,10 +214,16 @@ async fn main() -> Result<(), Error> {
             UDPNetwork::Ephemeral(Default::default())
         };
 
+        // Parse STUN server URL
+        let stun_url = Url::parse_url(stun_server_url)?;
+        println!("Using STUN server: {}", stun_url);
+
         let ice_agent = Arc::new(
             Agent::new(AgentConfig {
+                urls: vec![stun_url],
                 network_types: vec![NetworkType::Udp4],
                 udp_network,
+                is_controlling,
                 ..Default::default()
             })
             .await?,
@@ -202,9 +233,11 @@ async fn main() -> Result<(), Error> {
 
         // When we have gathered a new ICE Candidate send it to the remote peer
         let client2 = Arc::clone(&client);
+        let remote_host_clone = remote_host.to_string();
         ice_agent.on_candidate(Box::new(
             move |c: Option<Arc<dyn Candidate + Send + Sync>>| {
                 let client3 = Arc::clone(&client2);
+                let remote_host2 = remote_host_clone.clone();
                 Box::pin(async move {
                     if let Some(c) = c {
                         println!("posting remoteCandidate with {}", c.marshal());
@@ -212,7 +245,8 @@ async fn main() -> Result<(), Error> {
                         let req = match Request::builder()
                             .method(Method::POST)
                             .uri(format!(
-                                "http://localhost:{remote_http_port}/remoteCandidate"
+                                "http://{}:{}/remoteCandidate",
+                                remote_host2, remote_http_port
                             ))
                             .body(Body::from(c.marshal()))
                         {
@@ -251,7 +285,7 @@ async fn main() -> Result<(), Error> {
         println!("posting remoteAuth with {local_ufrag}:{local_pwd}");
         let req = Request::builder()
             .method(Method::POST)
-            .uri(format!("http://localhost:{remote_http_port}/remoteAuth"))
+            .uri(format!("http://{}:{}/remoteAuth", remote_host, remote_http_port))
             .body(Body::from(format!("{local_ufrag}:{local_pwd}")))
             .map_err(|err| Error::Other(format!("{err}")))?;
 
