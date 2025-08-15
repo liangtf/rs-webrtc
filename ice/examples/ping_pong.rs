@@ -11,7 +11,7 @@ use ice::candidate::candidate_base::*;
 use ice::candidate::*;
 use ice::network_type::*;
 use ice::state::*;
-use ice::udp_network::UDPNetwork;
+use ice::udp_network::{EphemeralUDP, UDPNetwork};
 use ice::url::Url;
 use ice::Error;
 use rand::{rng, Rng};
@@ -219,7 +219,10 @@ async fn main() -> Result<(), Error> {
 
             UDPNetwork::Muxed(udp_mux)
         } else {
-            UDPNetwork::Ephemeral(Default::default())
+            // UDPNetwork::Ephemeral(Default::default())
+            UDPNetwork::Ephemeral(
+                EphemeralUDP::new(40000, 65535).expect("Failed to set port range")
+            )
         };
 
         // Parse STUN server URL
